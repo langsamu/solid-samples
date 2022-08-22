@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Solid samples</title>
+    </head>
+    <body>
+        <h1>Read a Solid resource with OIDC code flow and dynamic client registration</h1>
+        <p>Output in console</p>
+        <script type="module">
+            const identityProviderUri = "https://login.inrupt.com"
+
+            const credentials = await getOidcCredentials(identityProviderUri)
+            if (credentials) {
+                const resourceUri = prompt("Solid resource URI (e.g. https://storage.inrupt.com/someguid/)")
+
+                const body = await solidReadResourceBody(resourceUri, credentials.access_token)
+
+                console.group("Response body for Solid resource")
+                console.log(body)
+                console.groupEnd()
+            }
+
+            async function solidReadResourceBody(resourceUri, accessToken) {
+                const options = {
+                    headers: {
+                        Authorization: bearer(accessToken)
+                    }
+                }
+                const response = await fetch(resourceUri, options)
+
+                return await response.text()
+            }
+
+            async function getOidcCredentials(identityProviderUri) {
+                const redirectUri = new URL(location.pathname, location)
+                const registration = await registerClientIfRequired(identityProviderUri, redirectUri)
+                const query = new URLSearchParams(location.search)
+
+                if (query.has("code")) {
+                    const credentials = await oidcExchangeCodeForToken(identityProviderUri, query.get("code"), registration.client_id, registration.client_secret, redirectUri)
+
+                    query.delete("code")
+                    history.replaceState(undefined, undefined, new URL(`?${query}`, location))
+
+                    return credentials
+                } else {
+                    await oidcRedirectToAuthorizationEndpoint(identityProviderUri, registration.client_id, redirectUri)
+                }
+            }
+
+            async function registerClientIfRequired(identityProviderUri, redirectUri) {
+                let clientId = sessionStorage.getItem("client_id")
+                let clientSecret = sessionStorage.getItem("client_secret")
+
+                if (clientId) {
+                    return {client_id: clientId, client_secret: clientSecret}
+                }
+
+                const registration = await oidcRegisterClient(identityProviderUri, redirectUri)
+                sessionStorage.setItem("client_id", registration.client_id)
+                sessionStorage.setItem("client_secret", registration.client_secret)
+
+                return {client_id: registration.client_id, client_secret: registration.client_secret}
+            }
+
+            async function oidcDiscover(identityProviderUri) {
+                const discoveryUri = new URL(".well-known/openid-configuration", identityProviderUri)
+
+                const response = await fetch(discoveryUri)
+
+                return await response.json()
+            }
+
+            async function oidcRegisterClient(identityProviderUri, redirectUri) {
+                const discoveryDocument = await oidcDiscover(identityProviderUri)
+                const registrationDocument = {redirect_uris: [redirectUri]}
+                const body = JSON.stringify(registrationDocument)
+
+                const options = {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body
+                }
+
+                const response = await fetch(discoveryDocument.registration_endpoint, options)
+
+                return await response.json()
+            }
+
+            async function oidcRedirectToAuthorizationEndpoint(identityProviderUri, clientId, redirectUri) {
+                const discoveryDocument = await oidcDiscover(identityProviderUri)
+                const scope = ["openid", "webid"].join(" ")
+
+                const authorizationRequest = new URLSearchParams({
+                    scope,
+                    response_type: "code",
+                    client_id: clientId,
+                    redirect_uri: redirectUri,
+                })
+
+                const authorizationUrl = new URL(`?${authorizationRequest}`, discoveryDocument.authorization_endpoint)
+
+                location.assign(authorizationUrl)
+            }
+
+            async function oidcExchangeCodeForToken(identityProviderUri, code, clientId, clientSecret, redirectUri) {
+                const discoveryDocument = await oidcDiscover(identityProviderUri)
+
+                const options = {
+                    method: "POST",
+                    headers: {Authorization: basic(clientId, clientSecret)},
+                    body: new URLSearchParams({
+                        grant_type: "authorization_code",
+                        client_id: clientId,
+                        code,
+                        redirect_uri: redirectUri
+                    })
+                }
+
+                const response = await fetch(discoveryDocument.token_endpoint, options)
+
+                return await response.json()
+            }
+
+            function basic(username, password) {
+                const credentials = [username, password].join(":")
+                const encoded = btoa(credentials)
+
+                return `Basic ${encoded}`
+            }
+
+            function bearer(token) {
+                return `Bearer ${token}`
+            }
+        </script>
+    </body>
+</html>
